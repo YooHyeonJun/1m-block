@@ -7,6 +7,7 @@
 #include <linux/tcp.h>
 #include <linux/types.h>
 #include <linux/netfilter.h>
+#include <regex.h>
 #include <libnetfilter_queue/libnetfilter_queue.h>
 #include <time.h>
 
@@ -25,7 +26,7 @@ unsigned long hash(const char* str) {
     return hash % HASH_TABLE_SIZE;
 }
 
-void insert_block_host(const char* host) {
+void insertBlockHost(const char* host) {
     unsigned long h = hash(host);
     while (blocked_sites[h]) {
         if (strcmp(blocked_sites[h], host) == 0) return; // 이미 존재
@@ -34,7 +35,7 @@ void insert_block_host(const char* host) {
     blocked_sites[h] = strdup(host);
 }
 
-int is_blocked_host(const char* host) {
+int isBlockedHost(const char* host) {
     unsigned long h = hash(host);
     while (blocked_sites[h]) {
         if (strcmp(blocked_sites[h], host) == 0) return 1;
@@ -43,7 +44,7 @@ int is_blocked_host(const char* host) {
     return 0;
 }
 
-void load_block_list(const char* filename) {
+void loadBlockList(const char* filename) {
     FILE* fp = fopen(filename, "r");
     if (!fp) {
         perror("fopen");
@@ -65,7 +66,7 @@ void load_block_list(const char* filename) {
         if (!comma) continue;
         char* site = comma + 1;
         site[strcspn(site, "\r\n")] = 0;
-        insert_block_host(site);
+        insertBlockHost(site);
     }
 
     clock_gettime(CLOCK_MONOTONIC, &end);
@@ -75,26 +76,32 @@ void load_block_list(const char* filename) {
 }
 
 int extractHostRegex(const char* payload, int payload_len, char* out_host, size_t max_len) {
-    const char* p = payload;
-    const char* end = payload + payload_len;
-    const char* prefix = "Host: ";
+    regex_t regex;
+    regmatch_t matches[2];
+    const char* pattern = "Host: \([^\r\n]+\)";
+    char* payload_str = strndup(payload, payload_len);
 
-    while (p < end) {
-        if (strncmp(p, prefix, strlen(prefix)) == 0) {
-            p += strlen(prefix);
-            const char* eol = strstr(p, "\r\n");
-            if (eol && eol - p < max_len) {
-                strncpy(out_host, p, eol - p);
-                out_host[eol - p] = '\0';
-                return 1;
-            }
-            break;
-        }
-        p = memchr(p, '\n', end - p);
-        if (!p) break;
-        p++;
+    if (regcomp(&regex, pattern, REG_EXTENDED)) {
+        fprintf(stderr, "Could not compile regex\n");
+        free(payload_str);
+        return 0;
     }
-    return 0;
+
+    int ret = 0;
+    if (regexec(&regex, payload_str, 2, matches, 0) == 0) {
+        int start = matches[1].rm_so;
+        int end = matches[1].rm_eo;
+        int len = end - start;
+        if (len > 0 && len < max_len) {
+            strncpy(out_host, payload_str + start, len);
+            out_host[len] = '\0';
+            ret = 1;
+        }
+    }
+
+    regfree(&regex);
+    free(payload_str);
+    return ret;
 }
 int checkHttpHost(unsigned char *data, int size) {
     struct iphdr *ip = (struct iphdr *)data;
@@ -114,7 +121,7 @@ int checkHttpHost(unsigned char *data, int size) {
     char host[MAX_HOST_LEN] = {0};
     if (extractHostRegex((char *)payload, payload_len, host, sizeof(host))) {
         printf("[+] HTTP Host: %s\n", host);
-        if (is_blocked_host(host)) {
+        if (isBlockedHost(host)) {
             printf("[!] BLOCKED: %s\n", host);
             return 1;
         }
@@ -150,7 +157,7 @@ int main(int argc, char **argv) {
         exit(EXIT_FAILURE);
     }
 
-    load_block_list(argv[1]);
+    loadBlockList(argv[1]);
 
     struct nfq_handle *h;
     struct nfq_q_handle *qh;
